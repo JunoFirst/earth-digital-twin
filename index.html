@@ -1,0 +1,606 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Earth — Interactive 3D Digital Twin</title>
+
+<!-- Cesium needs its base URL set BEFORE the library loads (web workers, assets) -->
+<script>window.CESIUM_BASE_URL = 'https://cdn.jsdelivr.net/npm/cesium@1.122/Build/Cesium/';</script>
+<link href="https://cdn.jsdelivr.net/npm/cesium@1.122/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.122/Build/Cesium/Cesium.js"></script>
+
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  #cesiumContainer { position: fixed; inset: 0; }
+
+  /* Hide Cesium's default attribution lightbox button clutter; keep credits text */
+  .cesium-viewer-bottom { left: 8px; bottom: 6px; opacity: .55; }
+
+  /* ---------- Control panel ---------- */
+  #panel {
+    position: fixed; top: 14px; left: 14px; width: 248px; z-index: 10;
+    background: rgba(14,18,28,.82); backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,.10); border-radius: 14px;
+    padding: 14px 14px 12px; color: #e8edf6;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5);
+  }
+  #panel h1 { font-size: 14px; margin: 0 0 2px; letter-spacing: .2px; }
+  #panel .sub { font-size: 11px; color: #93a0b4; margin: 0 0 12px; }
+  .row { display: flex; align-items: center; justify-content: space-between;
+    padding: 7px 0; border-top: 1px solid rgba(255,255,255,.06); }
+  .row:first-of-type { border-top: none; }
+  .row label { font-size: 13px; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .row .ic { width: 16px; text-align: center; opacity: .85; }
+
+  /* iOS-style switch */
+  .sw { position: relative; width: 40px; height: 22px; flex: 0 0 auto; }
+  .sw input { opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .sw .track { position: absolute; inset: 0; border-radius: 999px; background: #3a4252; transition: .18s; pointer-events: none; }
+  .sw .knob { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; transition: .18s; pointer-events: none; }
+  .sw input:checked + .track { background: #4c8dff; }
+  .sw input:checked + .track + .knob { transform: translateX(18px); }
+
+  #fly { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 12px; }
+  #fly button {
+    font-size: 11px; color: #dfe7f3; background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.10); border-radius: 8px; padding: 7px 4px; cursor: pointer;
+  }
+  #fly button:hover { background: rgba(76,141,255,.22); border-color: rgba(76,141,255,.5); }
+  #fly .full { grid-column: 1 / -1; }
+
+  .hint { font-size: 10.5px; color: #7c899c; margin-top: 11px; line-height: 1.45; }
+
+  /* ---------- Hover popup ---------- */
+  #popup {
+    position: fixed; z-index: 20; pointer-events: none; display: none;
+    min-width: 190px; max-width: 240px; transform: translate(14px, 14px);
+    background: rgba(14,18,28,.92); backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,.12); border-radius: 12px;
+    padding: 11px 13px; color: #eef2f8; box-shadow: 0 10px 30px rgba(0,0,0,.55);
+  }
+  #popup .name { font-size: 14px; font-weight: 600; margin-bottom: 7px; display: flex; gap: 7px; align-items: center; }
+  #popup .name .flag { font-size: 17px; }
+  #popup .stat { display: flex; justify-content: space-between; font-size: 12px; padding: 2.5px 0; }
+  #popup .stat .k { color: #93a0b4; }
+  #popup .stat .v { color: #fff; font-variant-numeric: tabular-nums; }
+  #popup .cont { font-size: 10.5px; color: #7c899c; margin-top: 6px; }
+
+  /* ---------- toasts / loading ---------- */
+  #loading {
+    position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 50% 40%, #0b1726, #000); color: #cdd7e6; flex-direction: column; gap: 16px;
+  }
+  #loading .ring { width: 42px; height: 42px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,.15); border-top-color: #4c8dff; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading .t { font-size: 13px; letter-spacing: .3px; }
+  #loading .s { font-size: 11px; color: #6f7d92; }
+
+  #notice {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 30;
+    background: rgba(20,26,38,.92); border: 1px solid rgba(255,255,255,.12); color: #e6ecf6;
+    font-size: 12px; padding: 9px 14px; border-radius: 10px; display: none; max-width: 80vw;
+  }
+</style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+
+  <div id="panel">
+    <h1>🌍 Earth — Digital Twin</h1>
+    <p class="sub">Free imagery · daily data · no API keys</p>
+
+    <div class="row">
+      <label for="t-atmo"><span class="ic">🌫️</span> Atmosphere</label>
+      <span class="sw"><input type="checkbox" id="t-atmo" checked><span class="track"></span><span class="knob"></span></span>
+    </div>
+    <div class="row">
+      <label for="t-cloud"><span class="ic">☁️</span> Daily cloud cover</label>
+      <span class="sw"><input type="checkbox" id="t-cloud"><span class="track"></span><span class="knob"></span></span>
+    </div>
+    <div class="row">
+      <label for="t-night"><span class="ic">🌃</span> Night / city lights</label>
+      <span class="sw"><input type="checkbox" id="t-night"><span class="track"></span><span class="knob"></span></span>
+    </div>
+    <div class="row">
+      <label for="t-flights"><span class="ic">✈️</span> Typical flight traffic</label>
+      <span class="sw"><input type="checkbox" id="t-flights"><span class="track"></span><span class="knob"></span></span>
+    </div>
+
+    <div id="fly">
+      <button class="full" data-reset="1">🚀 Back to orbit</button>
+    </div>
+  </div>
+
+  <div id="popup"></div>
+  <div id="notice"></div>
+  <div id="loading">
+    <div class="ring"></div>
+    <div class="t">Assembling the planet…</div>
+    <div class="s" id="loadsub">loading imagery &amp; country data</div>
+  </div>
+
+<script>
+(async function () {
+  "use strict";
+
+  const $ = (s) => document.querySelector(s);
+  const notice = (msg, ms = 4200) => {
+    const n = $("#notice"); n.textContent = msg; n.style.display = "block";
+    clearTimeout(notice._t); if (ms) notice._t = setTimeout(() => (n.style.display = "none"), ms);
+  };
+
+  // GIBS daily imagery lags ~1 day behind real time. dateBack(n) gives the
+  // YYYY-MM-DD for n days ago; the cloud stack prefers the freshest day (1) and
+  // falls back through older days to fill gaps. gibsDate = freshest (yesterday).
+  const dayMs = 864e5;
+  const dateBack = (n) => new Date(Date.now() - n * dayMs).toISOString().slice(0, 10);
+  const gibsDate = dateBack(1);
+  const gibs = (layer, matrix, ext, time) =>
+    `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layer}/default/` +
+    (time ? `${time}/` : "") + `${matrix}/{z}/{y}/{x}.${ext}`;
+
+  // ---- Viewer (no Cesium-ion assets used anywhere → no token required) ----
+  const esriBase = new Cesium.ImageryLayer(
+    new Cesium.UrlTemplateImageryProvider({
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      maximumLevel: 19,
+      credit: "Imagery © Esri, Maxar, Earthstar Geographics",
+    })
+  );
+
+  const viewer = new Cesium.Viewer("cesiumContainer", {
+    baseLayer: esriBase,
+    baseLayerPicker: false,
+    geocoder: false,            // default geocoder needs ion
+    homeButton: false,
+    sceneModePicker: false,
+    navigationHelpButton: false,
+    animation: false,
+    timeline: false,
+    fullscreenButton: false,
+    infoBox: false,             // we use our own hover popup
+    selectionIndicator: false,
+    contextOptions: { webgl: { powerPreference: "high-performance" } },
+  });
+
+  const scene = viewer.scene, globe = scene.globe, camera = scene.camera;
+  globe.baseColor = Cesium.Color.fromCssColorString("#0b1018");
+  globe.showGroundAtmosphere = true;
+  scene.skyAtmosphere.show = true;
+  scene.highDynamicRange = true;
+  scene.fog.enabled = true;
+  scene.screenSpaceCameraController.minimumZoomDistance = 80; // let users get to street level
+
+  // Start with an orbital view
+  camera.setView({
+    destination: Cesium.Cartesian3.fromDegrees(8, 22, 26_000_000),
+    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-90), roll: 0 },
+  });
+
+  // ---- Overlay layers (added once, toggled via .show) ----
+  const layers = viewer.imageryLayers;
+
+  // Daily cloud cover. We PREFER the freshest daily composite and stack
+  // progressively OLDER days beneath it (with a second/third sensor on the
+  // freshest day for extra same-day coverage). Every layer except the oldest has
+  // its black no-data pixels punched transparent (colorToAlpha), so wherever a
+  // fresher pass has a gap the next-best older data shows through. The oldest day
+  // stays opaque as a final backstop. Small residual gaps are expected and fine.
+  const CLOUD_ALPHA = 0.9;
+  const CLOUD_FADE_LOW  = 20000;   // clouds fully faded out below this height (m)
+  const CLOUD_FADE_HIGH = 800000;  // clouds at full strength above this height (m)
+  const CLOUD_STACK = [ // top (preferred / freshest) → bottom (oldest fallback)
+    { id: "MODIS_Terra_CorrectedReflectance_TrueColor", days: 1, label: "MODIS/Terra" },
+    { id: "MODIS_Aqua_CorrectedReflectance_TrueColor",  days: 1, label: "MODIS/Aqua" },
+    { id: "VIIRS_SNPP_CorrectedReflectance_TrueColor",  days: 1, label: "VIIRS/SNPP" },
+    { id: "VIIRS_SNPP_CorrectedReflectance_TrueColor",  days: 2, label: "VIIRS/SNPP" },
+    { id: "VIIRS_SNPP_CorrectedReflectance_TrueColor",  days: 3, label: "VIIRS/SNPP" },
+  ];
+  // Cesium draws later-added layers on top, so add the stack bottom-first
+  // (reversed): the oldest fallback goes down first as the opaque base, and the
+  // freshest day ends up on top where it's preferred.
+  const cloudLayers = CLOUD_STACK.slice().reverse().map((s, iFromBottom) => {
+    const date = dateBack(s.days);
+    const lyr = layers.addImageryProvider(new Cesium.UrlTemplateImageryProvider({
+      url: gibs(s.id, "GoogleMapsCompatible_Level9", "jpg", date),
+      maximumLevel: 8, // hands off to the sharp Esri base as you zoom in past it
+      credit: "Clouds: NASA GIBS " + s.label + " (" + date + ")",
+    }));
+    lyr.show = false;
+    lyr.alpha = CLOUD_ALPHA;
+    if (iFromBottom > 0) { // everything above the oldest opaque backstop reveals beneath
+      lyr.colorToAlpha = Cesium.Color.BLACK;
+      lyr.colorToAlphaThreshold = 0.08; // only near-pure-black no-data turns clear
+    }
+    return lyr;
+  });
+
+  // Fade every cloud layer out together as the camera descends, so they don't haze
+  // up street level. The lowered band keeps clouds visible much closer to the ground.
+  scene.preRender.addEventListener(() => {
+    if (!cloudLayers[0].show) return;
+    const h = camera.positionCartographic ? camera.positionCartographic.height : 1e7;
+    const a = CLOUD_ALPHA * Cesium.Math.clamp((h - CLOUD_FADE_LOW) / (CLOUD_FADE_HIGH - CLOUD_FADE_LOW), 0, 1);
+    cloudLayers.forEach((l) => (l.alpha = a));
+  });
+
+  // Night lights. Two sources, both recoloured to an amber glow on a canvas
+  // (GIBS serves these tiles grayscale/opaque, so Cesium's hue/saturation can't
+  // tint them):
+  //   • Daily NASA "Black Marble" (gap-filled, BRDF-corrected VIIRS Day/Night
+  //     Band) — current, ~3-day lag, drawn on top. BUT in a hemisphere's summer
+  //     the high latitudes are in 24h daylight, so the DNB records no night there
+  //     and places like Iceland go dark.
+  //   • The all-season 2012 VIIRS CityLights composite sits at the BOTTOM as a
+  //     fill, so those polar-day gaps (and anywhere the daily pass missed) still
+  //     light up.
+  // Recolour maps luminance → glow and luminance → alpha, so unlit ground drops
+  // out and only city lights glow over the dimmed Earth.
+  const NIGHT_GAIN = 1.7;               // brighten the dim radiance
+  const NIGHT_TINT = [1.0, 0.8, 0.55];  // R,G,B multipliers → soft warm amber (less orange)
+  const NIGHT_FLOOR = 16;               // glow below this → fully transparent (kills speckle)
+  function tintNight(p) {               // recolour any night-imagery provider in place
+    const orig = p.requestImage.bind(p);
+    p.requestImage = (x, y, level, request) => {
+      const r = orig(x, y, level, request);
+      if (!r) return r; // undefined → Cesium is throttling; let it retry later
+      return Promise.resolve(r).then((img) => {
+        if (!img) return img;
+        const w = img.width, h = img.height;
+        const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+        const cx = cv.getContext("2d"); cx.drawImage(img, 0, 0);
+        const id = cx.getImageData(0, 0, w, h), a = id.data;
+        for (let i = 0; i < a.length; i += 4) {
+          const lum = Math.max(a[i], a[i + 1], a[i + 2]); // grayscale DNB or colour 2012
+          const glow = Math.min(255, lum * NIGHT_GAIN);
+          a[i]     = Math.min(255, glow * NIGHT_TINT[0]);
+          a[i + 1] = Math.min(255, glow * NIGHT_TINT[1]);
+          a[i + 2] = Math.min(255, glow * NIGHT_TINT[2]);
+          a[i + 3] = glow < NIGHT_FLOOR ? 0 : glow; // unlit → transparent
+        }
+        cx.putImageData(id, 0, 0);
+        return cv;
+      }).catch(() => img); // CORS-taint or decode issue → fall back to raw tile
+    };
+    return p;
+  }
+  // In a hemisphere's summer the high latitudes never get fully dark, so the DNB
+  // washes out into a bright glow above ~55° (verified: solid wash >66°, partial
+  // 55-66°). Clip the daily layers to ±55° latitude so that wash never appears;
+  // beyond ±55° only the all-season 2012 fill shows (incl. summer Iceland).
+  const NIGHT_DAILY_LAT = 55;
+  const dailyNight = (date) => tintNight(new Cesium.UrlTemplateImageryProvider({
+    url: gibs("VIIRS_SNPP_GapFilled_BRDF_Corrected_DayNightBand_Radiance", "GoogleMapsCompatible_Level8", "png", date),
+    maximumLevel: 8,
+    rectangle: Cesium.Rectangle.fromDegrees(-180, -NIGHT_DAILY_LAT, 180, NIGHT_DAILY_LAT),
+    credit: "Night lights: NASA GIBS / VIIRS Black Marble (" + date + ")",
+  }));
+  const NIGHT_DAYS = [3, 4, 5]; // recent days to stack, freshest on top
+  const nightLayers = [
+    // bottom: all-season 2012 composite fills polar-day gaps (e.g. summer Iceland)
+    layers.addImageryProvider(tintNight(new Cesium.UrlTemplateImageryProvider({
+      url: gibs("VIIRS_CityLights_2012", "GoogleMapsCompatible_Level8", "jpg", null),
+      maximumLevel: 8,
+      credit: "Night lights fill: NASA Earth Observatory / VIIRS 2012",
+    }))),
+    // above it: the daily Black Marble, oldest → freshest so the newest is on top
+    ...NIGHT_DAYS.slice().reverse().map((d) => layers.addImageryProvider(dailyNight(dateBack(d)))),
+  ];
+  nightLayers.forEach((l) => (l.show = false));
+
+  // ---------------------------------------------------------------------------
+  // Toggles
+  // ---------------------------------------------------------------------------
+  $("#t-atmo").addEventListener("change", (e) => {
+    scene.skyAtmosphere.show = e.target.checked;
+    globe.showGroundAtmosphere = e.target.checked;
+    scene.fog.enabled = e.target.checked;
+  });
+
+  $("#t-cloud").addEventListener("change", (e) => {
+    cloudLayers.forEach((l) => (l.show = e.target.checked));
+  });
+
+  $("#t-night").addEventListener("change", (e) => {
+    const on = e.target.checked;
+    nightLayers.forEach((l) => (l.show = on));
+    globe.enableLighting = on;          // real sun terminator shading
+    esriBase.brightness = on ? 0.35 : 1.0;   // dim the day side so lights glow
+    scene.skyAtmosphere.brightnessShift = on ? -0.4 : 0.0;
+  });
+
+  // ---------------------------------------------------------------------------
+  // Fly-to buttons (demonstrates seamless space → street zoom)
+  // ---------------------------------------------------------------------------
+  $("#fly").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.reset) {
+      camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(8, 22, 26_000_000),
+        orientation: { heading: 0, pitch: Cesium.Math.toRadians(-90), roll: 0 }, duration: 2.5,
+      });
+      return;
+    }
+    camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(+b.dataset.lon, +b.dataset.lat - 0.012, +b.dataset.h),
+      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-32), roll: 0 }, duration: 3.2,
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Countries: outlines + hover stats
+  // ---------------------------------------------------------------------------
+  const R = 6378137;
+  const rad = (d) => (d * Math.PI) / 180;
+  function ringArea(ring) {
+    let a = 0, n = ring.length;
+    if (n < 3) return 0;
+    for (let i = 0; i < n; i++) {
+      const [lo1, la1] = ring[i], [lo2, la2] = ring[(i + 1) % n];
+      a += rad(lo2 - lo1) * (2 + Math.sin(rad(la1)) + Math.sin(rad(la2)));
+    }
+    return Math.abs((a * R * R) / 2);
+  }
+  const polyArea = (rings) => rings.reduce((s, r, i) => s + (i ? -ringArea(r) : ringArea(r)), 0);
+  function geomArea(g) {
+    if (g.type === "Polygon") return polyArea(g.coordinates);
+    if (g.type === "MultiPolygon") return g.coordinates.reduce((s, p) => s + polyArea(p), 0);
+    return 0;
+  }
+  const flagEmoji = (cc) =>
+    !cc || cc.length !== 2 || cc.startsWith("-")
+      ? "🏳️"
+      : cc.toUpperCase().replace(/./g, (c) => String.fromCodePoint(127397 + c.charCodeAt(0)));
+  const fmtInt = (n) => (n == null || isNaN(n) ? "—" : Math.round(n).toLocaleString());
+  function fmtMoney(md) { // GDP given in millions USD
+    if (md == null || isNaN(md) || md <= 0) return "—";
+    const usd = md * 1e6;
+    if (usd >= 1e12) return "$" + (usd / 1e12).toFixed(2) + " T";
+    if (usd >= 1e9)  return "$" + (usd / 1e9).toFixed(1) + " B";
+    return "$" + (usd / 1e6).toFixed(0) + " M";
+  }
+
+  // Fill alpha alone (0.45) washes out over bright basemap colours (deserts, sand,
+  // snow), so the hover state also flashes the outline — that reads on any imagery.
+  const HIGHLIGHT = Cesium.Color.fromCssColorString("#ffd24c").withAlpha(0.65);
+  const FILL = Cesium.Color.WHITE.withAlpha(0.012); // near-invisible but still pickable
+  const STROKE = Cesium.Color.fromCssColorString("#9fc0ff").withAlpha(0.4);
+  const HOVER_STROKE = Cesium.Color.fromCssColorString("#fff4d6");
+  // Country stats only make sense at an overview altitude. Once the camera is
+  // closer to the ground than this (metres), the popup is suppressed/hidden.
+  const STATS_MIN_HEIGHT = 400000; // 400 km — tune to taste
+  let countriesDS = null;
+
+  try {
+    $("#loadsub").textContent = "downloading country boundaries…";
+    const url = "https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@v5.1.2/geojson/ne_50m_admin_0_countries.geojson";
+    const geo = await fetch(url).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); });
+    geo.features.forEach((f) => { f.properties.__area = geomArea(f.geometry) / 1e6; }); // km²
+
+    countriesDS = await Cesium.GeoJsonDataSource.load(geo, {
+      stroke: STROKE,
+      fill: FILL,
+      strokeWidth: 1,
+      clampToGround: false,
+    });
+    countriesDS.entities.values.forEach((ent) => { if (ent.polygon) ent.polygon.outline = true; });
+    await viewer.dataSources.add(countriesDS);
+  } catch (err) {
+    notice("Country stats unavailable (boundary data failed to load) — globe still works.", 6000);
+    console.error("country load failed", err);
+  }
+
+  // Hover handler
+  const popup = $("#popup");
+  let hot = null; // currently highlighted entity
+  const restore = () => {
+    if (hot && hot.polygon) {
+      hot.polygon.material = FILL;
+      hot.polygon.outlineColor = STROKE;
+      hot.polygon.outlineWidth = 1;
+      hot = null;
+    }
+  };
+
+  // Auto-dismiss the stats popup once the camera drops below the overview altitude,
+  // so it vanishes as you zoom in even if the pointer never moves.
+  scene.preRender.addEventListener(() => {
+    if (popup.style.display === "none") return;
+    const h = camera.positionCartographic ? camera.positionCartographic.height : 1e7;
+    if (h < STATS_MIN_HEIGHT) { restore(); popup.style.display = "none"; }
+  });
+
+  const handler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
+
+  // Show (or hide) the stats popup for whatever country sits under a screen point.
+  // Shared by desktop hover (MOUSE_MOVE) and touch/click tap (LEFT_CLICK), since
+  // phones have no hover — a tap is the only way to reveal a country's stats.
+  function showStatsAt(screenPos) {
+    // Suppress entirely when zoomed in past the overview altitude.
+    const camH = camera.positionCartographic ? camera.positionCartographic.height : 1e7;
+    if (camH < STATS_MIN_HEIGHT) { restore(); popup.style.display = "none"; return; }
+    const picked = scene.pick(screenPos);
+    const ent = picked && picked.id;
+    const isCountry = ent && ent.polygon && countriesDS && countriesDS.entities.contains(ent);
+
+    if (!isCountry) { restore(); popup.style.display = "none"; return; }
+    if (ent !== hot) {
+      restore();
+      hot = ent;   // tracked for the popup only — no colour highlight on the country
+    }
+
+    const p = ent.properties.getValue(Cesium.JulianDate.now());
+    const cc = p.ISO_A2_EH && !String(p.ISO_A2_EH).startsWith("-") ? p.ISO_A2_EH : p.ISO_A2;
+    popup.innerHTML =
+      `<div class="name"><span class="flag">${flagEmoji(cc)}</span>${p.NAME || p.ADMIN || "Unknown"}</div>` +
+      `<div class="stat"><span class="k">Area</span><span class="v">${fmtInt(p.__area)} km²</span></div>` +
+      `<div class="stat"><span class="k">Population</span><span class="v">${fmtInt(p.POP_EST)}</span></div>` +
+      `<div class="stat"><span class="k">GDP</span><span class="v">${fmtMoney(p.GDP_MD)}</span></div>` +
+      (p.CONTINENT ? `<div class="cont">${p.CONTINENT}${p.ECONOMY ? " · " + String(p.ECONOMY).replace(/^\d+\.\s*/, "") : ""}</div>` : "");
+    popup.style.display = "block";
+    popup.style.left = screenPos.x + "px";
+    popup.style.top = screenPos.y + "px";
+    // keep popup on-screen near right/bottom edges
+    const r = popup.getBoundingClientRect();
+    popup.style.transform =
+      `translate(${screenPos.x + r.width + 30 > innerWidth ? -r.width - 14 : 14}px,` +
+      `${screenPos.y + r.height + 30 > innerHeight ? -r.height - 14 : 14}px)`;
+  }
+
+  // Desktop: hover to reveal stats (endPosition = where the cursor moved to).
+  handler.setInputAction((m) => showStatsAt(m.endPosition), Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+  // Touch / mouse: tap a country to reveal stats, tap empty space to dismiss
+  // (position = where the tap landed). A drag to rotate the globe doesn't fire this.
+  handler.setInputAction((m) => showStatsAt(m.position), Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+  // ---------------------------------------------------------------------------
+  // Flight traffic — smooth, clock-driven motion with glowing tapered trails.
+  // A simulated fleet of great-circle cruises between major hubs. (Live ADS-B
+  // feeds — OpenSky, adsb.lol, adsb.fi — are all CORS-locked to their own sites,
+  // so a static page can't read them in-browser; this synthetic fleet needs no
+  // network and is reliable everywhere, including on GitHub Pages and offline.)
+  // ---------------------------------------------------------------------------
+  viewer.clock.shouldAnimate = true;   // advance the sim clock so positions/trails animate
+  viewer.clock.multiplier = 6;         // lively pace (also speeds the day/night terminator)
+  const Jul = Cesium.JulianDate;
+  const flights = { on: false, ents: [] };
+  const SYNTH_FLIGHTS = 700; // simulated aircraft; raise for denser traffic, lower if FPS dips
+
+  // little airplane glyph (points "north"; we rotate by heading)
+  const PLANE = "data:image/svg+xml;base64," + btoa(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24">' +
+    '<path fill="#eaf2ff" stroke="#1b3a6b" stroke-width="0.6" ' +
+    'd="M12 2c.7 0 1.3 1.4 1.3 3.1v4.3l8 4.7v2.1l-8-2.4v4.4l2.2 1.6v1.6L12 20.4 8.5 21.5v-1.6l2.2-1.6v-4.4l-8 2.4v-2.1l8-4.7V5.1C10.7 3.4 11.3 2 12 2z"/></svg>'
+  );
+
+  function clearFlights() {
+    flights.ents.forEach((e) => viewer.entities.remove(e));
+    flights.ents = [];
+  }
+
+  // Build the aircraft's forward direction as a unit vector in Earth-fixed space,
+  // so the billboard can be aligned to it. Screen-space rotation alone can't track
+  // a geographic heading once the globe is tilted or rotated.
+  const _pos = new Cesium.Cartesian3(), _enu = new Cesium.Matrix4();
+  function forwardAxis(lon, lat, trackDeg, result) {
+    result = result || new Cesium.Cartesian3();
+    const c = Cesium.Cartesian3.fromDegrees(lon, lat, 0, Cesium.Ellipsoid.WGS84, _pos);
+    const m = Cesium.Transforms.eastNorthUpToFixedFrame(c, Cesium.Ellipsoid.WGS84, _enu);
+    const tr = Cesium.Math.toRadians(trackDeg), s = Math.sin(tr), k = Math.cos(tr);
+    result.x = m[0] * s + m[4] * k;   // sin·east + cos·north  (east = col0, north = col1)
+    result.y = m[1] * s + m[5] * k;
+    result.z = m[2] * s + m[6] * k;
+    return Cesium.Cartesian3.normalize(result, result);
+  }
+
+  // Position is a function of clock time, so the PathGraphics can sample it
+  // backwards in time to draw a trail that follows the aircraft automatically.
+  function addPlane(posProp, axisProp, trailColor, trailTime, resolution) {
+    return viewer.entities.add({
+      position: posProp,
+      billboard: {
+        image: PLANE, scale: 0.6,
+        alignedAxis: axisProp,        // nose aligned to travel direction at any camera angle
+        // Depth-test at globe scale so far-side planes hide behind the Earth like
+        // their trails do (was Infinity → icons showed through, trails didn't).
+        // Still un-clipped within 5000 km so close-up street views aren't culled.
+        disableDepthTestDistance: 5.0e6,
+        scaleByDistance: new Cesium.NearFarScalar(3e5, 0.32, 8e6, 0.7),
+      },
+      path: {
+        width: 3, leadTime: 0, trailTime, resolution,
+        material: new Cesium.PolylineGlowMaterialProperty({
+          glowPower: 0.25, taperPower: 1.0, color: trailColor,   // 1.0 = uniform-width (visible) trail
+        }),
+      },
+    });
+  }
+
+  // Continuous great-circle cruises between major hubs worldwide. A broad,
+  // well-distributed hub list keeps busy airports (LHR, JFK, DXB, HND…) full of
+  // traffic and spreads contrails across every continent and ocean.
+  const HUBS = [
+    // North America
+    [-73.78, 40.64], [-118.41, 33.94], [-84.43, 33.64], [-87.90, 41.98],
+    [-97.04, 32.90], [-122.38, 37.62], [-80.29, 25.79], [-79.63, 43.68],
+    // Latin America
+    [-99.07, 19.44], [-46.47, -23.43], [-43.25, -22.81], [-74.15, 4.70],
+    // Europe
+    [-0.45, 51.47], [2.55, 49.01], [8.57, 50.04], [4.76, 52.31],
+    [-3.57, 40.47], [12.25, 41.80], [37.41, 55.97], [28.74, 41.26],
+    // Middle East / Africa
+    [55.36, 25.25], [51.61, 25.27], [31.41, 30.11], [3.32, 6.58],
+    [36.93, -1.32], [28.25, -26.13], [18.60, -33.97],
+    // South & East Asia
+    [77.10, 28.56], [72.87, 19.09], [103.99, 1.36], [100.75, 13.69],
+    [114.20, 22.31], [116.60, 40.08], [121.81, 31.14], [126.45, 37.46],
+    [139.78, 35.55],
+    // Oceania
+    [151.18, -33.95], [144.84, -37.67], [174.79, -37.01],
+  ];
+  function bearing(a, b) {
+    const φ1 = rad(a[1]), φ2 = rad(b[1]), Δλ = rad(b[0] - a[0]);
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    return (Math.atan2(y, x) * 180) / Math.PI;
+  }
+  function gcInterp(a, b, f) {
+    const φ1 = rad(a[1]), λ1 = rad(a[0]), φ2 = rad(b[1]), λ2 = rad(b[0]);
+    const d = 2 * Math.asin(Math.min(1, Math.sqrt(Math.sin((φ2 - φ1) / 2) ** 2 +
+      Math.cos(φ1) * Math.cos(φ2) * Math.sin((λ2 - λ1) / 2) ** 2)));
+    if (!d) return a.slice();
+    const A = Math.sin((1 - f) * d) / Math.sin(d), B = Math.sin(f * d) / Math.sin(d);
+    const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2);
+    const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2);
+    const z = A * Math.sin(φ1) + B * Math.sin(φ2);
+    return [(Math.atan2(y, x) * 180) / Math.PI, (Math.atan2(z, Math.sqrt(x * x + y * y)) * 180) / Math.PI];
+  }
+  function spawnSynthetic(n) {
+    for (let i = 0; i < n; i++) {
+      let a, b;
+      do { a = HUBS[(Math.random() * HUBS.length) | 0]; b = HUBS[(Math.random() * HUBS.length) | 0]; } while (a === b);
+      const period = 150 + Math.random() * 170, alt = 10000 + Math.random() * 1500;
+      // start each plane at a random point along its route so the fleet is spread
+      // out in flight rather than all bunched at the hubs.
+      const epoch = Jul.addSeconds(viewer.clock.currentTime, -Math.random() * period, new Cesium.JulianDate());
+      const fOf = (t) => Jul.secondsDifference(t, epoch) / period; // unbounded → cruises the great circle
+      const pos = new Cesium.CallbackPositionProperty((t, r) => {
+        const p = gcInterp(a, b, fOf(t));
+        return Cesium.Cartesian3.fromDegrees(p[0], p[1], alt, Cesium.Ellipsoid.WGS84, r);
+      }, false);
+      const axis = new Cesium.CallbackProperty((t, r) => {
+        const f = fOf(t || viewer.clock.currentTime);
+        const p1 = gcInterp(a, b, f), p2 = gcInterp(a, b, f + 0.004);
+        return forwardAxis(p1[0], p1[1], bearing(p1, p2), r);
+      }, false);
+      flights.ents.push(addPlane(pos, axis, Cesium.Color.fromCssColorString("#ffce7a").withAlpha(0.6), 28, 3));
+    }
+  }
+
+  function setFlights(on) {
+    flights.on = on;
+    clearFlights();
+    if (!on) return;
+    spawnSynthetic(SYNTH_FLIGHTS);
+    notice("✈️ " + flights.ents.length + " simulated aircraft with trails", 3500);
+  }
+  $("#t-flights").addEventListener("change", (e) => setFlights(e.target.checked));
+
+  // ---------------------------------------------------------------------------
+  // Hide loader once the base tiles have rendered
+  // ---------------------------------------------------------------------------
+  let done = false;
+  const finish = () => { if (done) return; done = true; $("#loading").style.display = "none"; };
+  const stop = scene.globe.tileLoadProgressEvent.addEventListener((q) => {
+    if (q === 0) { finish(); stop(); }
+  });
+  setTimeout(finish, 6000); // safety net
+})();
+</script>
+</body>
+</html>
